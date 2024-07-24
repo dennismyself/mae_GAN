@@ -33,7 +33,7 @@ class PatchEmbed(nn.Module):
             self,
             img_size: Optional[int] = (12, 1000),
             patch_size: int = (1, 50),
-            in_chans: int = 1,
+            in_chans: int = 3,
             embed_dim: int = 128,
             norm_layer: Optional[Callable] = None,
             flatten: bool = True,
@@ -46,7 +46,7 @@ class PatchEmbed(nn.Module):
         self.patch_size = patch_size
         if img_size is not None:
             self.img_size = img_size
-            self.grid_size = tuple([s // p for s, p in zip(self.img_size, self.patch_size)])
+            self.grid_size = (int(self.img_size / self.patch_size), int(self.img_size / self.patch_size))
             self.num_patches = self.grid_size[0] * self.grid_size[1]
         else:
             self.img_size = None
@@ -64,7 +64,7 @@ class PatchEmbed(nn.Module):
         self.strict_img_size = strict_img_size
         self.dynamic_img_pad = dynamic_img_pad
         self.patch = nn.Sequential(
-          nn.Conv1d(1, 32, kernel_size=15, stride=1, bias=bias),
+          nn.Conv1d(3, 32, kernel_size=15, stride=1, bias=bias),
           nn.BatchNorm1d(32),
           nn.ReLU(),
           nn.Conv1d(32, 64, kernel_size=7, stride=1, bias=bias),
@@ -78,8 +78,8 @@ class PatchEmbed(nn.Module):
         B, C, H, W = x.shape
         if self.img_size is not None:
             if self.strict_img_size:
-                _assert(H == self.img_size[0], f"Input height ({H}) doesn't match model ({self.img_size[0]}).")
-                _assert(W == self.img_size[1], f"Input width ({W}) doesn't match model ({self.img_size[1]}).")
+                _assert(H == self.img_size, f"Input height ({H}) doesn't match model ({self.img_size}).")
+                _assert(W == self.img_size, f"Input width ({W}) doesn't match model ({self.img_size}).")
             elif not self.dynamic_img_pad:
                 _assert(
                     H % self.patch_size[0] == 0,
@@ -101,6 +101,8 @@ class PatchEmbed(nn.Module):
             x = nchw_to(x, self.output_fmt)
         # print(x.size())
         # 3 Convolutional Layers as described in the MAE ECG paper, along with batch normalisations.
+        # import pdb
+        # pdb.set_trace()
         x = self.patch(x).transpose(2, 1)
         # print(x.size())
         x = self.layer_norm(x)

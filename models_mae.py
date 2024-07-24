@@ -17,6 +17,7 @@ import numpy as np
 
 from timm.models.vision_transformer import Block
 from utils.patch_embed import PatchEmbed
+from timm.models.vision_transformer import PatchEmbed, Block
 
 from utils.pos_embed import get_2d_sincos_pos_embed
 
@@ -29,18 +30,14 @@ from utils.pos_embed import get_2d_sincos_pos_embed
 class MaskedAutoencoderViT(nn.Module):
     """ Masked Autoencoder with VisionTransformer backbone
     """
-    def __init__(self, img_size=(12, 1000), patch_size=(1, 50), in_chans=1,
-                 embed_dim=128, depth=6, num_heads=8,
-                 decoder_embed_dim=64, decoder_depth=3, decoder_num_heads=8,
-                 mlp_ratio=3., norm_layer=nn.LayerNorm, norm_pix_loss=False):
+    def __init__(self, img_size=224, patch_size=16, in_chans=3,
+                 embed_dim=1024, depth=24, num_heads=16,
+                 decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
+                 mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False):
         super().__init__()
 
         # --------------------------------------------------------------------------
         # MAE encoder specifics
-        # self.linear1 = nn.Linear(1, 32, bias=True)
-        # self.linear2 = nn.Linear(1, 32, bias=True)
-        self.output_shape = (img_size[0]//patch_size[0], img_size[1]//patch_size[1])
-
         self.patch_embed = PatchEmbed(img_size, patch_size, in_chans, embed_dim)
         num_patches = self.patch_embed.num_patches
 
@@ -51,7 +48,6 @@ class MaskedAutoencoderViT(nn.Module):
             Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer)
             for i in range(depth)])
         self.norm = norm_layer(embed_dim)
-
         # Discriminator Specifics
         self.discriminate = nn.Linear(embed_dim, 1, bias = True)
 
@@ -69,32 +65,26 @@ class MaskedAutoencoderViT(nn.Module):
             for i in range(decoder_depth)])
 
         self.decoder_norm = norm_layer(decoder_embed_dim)
-        self.decoder_pred = nn.Linear(decoder_embed_dim, patch_size[0]* patch_size[1] * in_chans, bias=True) # decoder to patch
+        self.decoder_pred = nn.Linear(decoder_embed_dim, patch_size**2 * in_chans, bias=True) # decoder to patch
         # --------------------------------------------------------------------------
 
         self.norm_pix_loss = norm_pix_loss
 
         self.initialize_weights()
-        
-    
+
     def initialize_weights(self):
         # initialization
         # initialize (and freeze) pos_embed by sin-cos embedding
-        pos_embed = get_2d_sincos_pos_embed(self.pos_embed.shape[-1], (12, self.patch_embed.num_patches//12), cls_token=True)
+        pos_embed = get_2d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), cls_token=True)
         # grid = (height, width). height = 12 here for 12 lead ecg signals
         self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
 
-        decoder_pos_embed = get_2d_sincos_pos_embed(self.decoder_pos_embed.shape[-1],  (12, self.patch_embed.num_patches//12), cls_token=True)
+        decoder_pos_embed = get_2d_sincos_pos_embed(self.decoder_pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), cls_token=True)
         self.decoder_pos_embed.data.copy_(torch.from_numpy(decoder_pos_embed).float().unsqueeze(0))
                     
-        for layer in self.patch_embed.patch:
-            if isinstance(layer, nn.Conv1d):
-                torch.nn.init.kaiming_normal_(layer.weight, mode='fan_in', nonlinearity='relu')
-                # if layer.bias is not None:
-                #     torch.nn.init.constant_(layer.bias, 0.0)
-            elif isinstance(layer, nn.LayerNorm):
-                nn.init.constant_(layer.bias, 0)
-                nn.init.constant_(layer.weight, 1.0)
+         # initialize patch_embed like nn.Linear (instead of nn.Conv2d)
+        w = self.patch_embed.proj.weight.data
+        torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
         
 
         # timm's trunc_normal_(std=.02) is effectively normal_(std=0.02) as cutoff is too big (2.)
@@ -106,7 +96,7 @@ class MaskedAutoencoderViT(nn.Module):
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
-            torch.nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
+            torch.nn.init.xavier_uniform_(m.weight)
             if isinstance(m, nn.Linear) and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
         elif isinstance(m, nn.LayerNorm):
@@ -118,32 +108,28 @@ class MaskedAutoencoderViT(nn.Module):
         imgs: (N, 1, H, W) - 12 channel ECG - H = No. of channels, W = Length of ECG signal (1000 in this case)
         x: (N, L, patch_size_height*patch_size_width*1)
         """
-        ph = self.patch_embed.patch_size[0]
-        pw = self.patch_embed.patch_size[1]
 
-        h = imgs.shape[2] // ph
-        w = imgs.shape[3] // pw
-        x = imgs.reshape(shape=(imgs.shape[0], 1, h, ph, w, pw))
+        p = self.patch_embed.patch_size[0]
+        assert imgs.shape[2] == imgs.shape[3] and imgs.shape[2] % p == 0
+
+        h = w = imgs.shape[2] // p
+        x = imgs.reshape(shape=(imgs.shape[0], 3, h, p, w, p))
         x = torch.einsum('nchpwq->nhwpqc', x)
-        x = x.reshape(shape=(imgs.shape[0], h * w, ph*pw * 1))
+        x = x.reshape(shape=(imgs.shape[0], h * w, p**2 * 3))
         return x
 
     def unpatchify(self, x):
         """
-        x: (N, L, patch_size_height*patch_size_width*1)
-        imgs: (N, 1, H, W) - 12 channel ECG - H = No. of channels, W = Length of ECG signal (1000 in this case)
+        x: (N, L, patch_size**2 *3)
+        imgs: (N, 3, H, W)
         """
-        ph = self.patch_embed.patch_size[0]
-        pw = self.patch_embed.patch_size[1]
-
-        # h = w = int(x.shape[1]**.5)
-        # assert h * w == x.shape[1]
-        h = 12
-        w = x.shape[1]//12
+        p = self.patch_embed.patch_size[0]
+        h = w = int(x.shape[1]**.5)
+        assert h * w == x.shape[1]
         
-        x = x.reshape(shape=(x.shape[0], h, w, ph, pw, 1))
+        x = x.reshape(shape=(x.shape[0], h, w, p, p, 3))
         x = torch.einsum('nhwpqc->nchpwq', x)
-        imgs = x.reshape(shape=(x.shape[0], 1, h * ph, w * pw))
+        imgs = x.reshape(shape=(x.shape[0], 3, h * p, h * p))
         return imgs
 
     def random_masking(self, x, mask_ratio):
@@ -177,6 +163,8 @@ class MaskedAutoencoderViT(nn.Module):
         # embed patches
         # print("before patch embed = "+str(x.size()))
         x = self.patch_embed(x)
+        # import pdb
+        # pdb.set_trace()
         # print("after patch embed = "+str(x.size()))
         # add pos embed w/o cls token
         x = x + self.pos_embed[:, 1:, :]
@@ -195,7 +183,7 @@ class MaskedAutoencoderViT(nn.Module):
         x = self.norm(x)
         # print(x.size())
 
-        return x, mask, ids_restore, 
+        return x, mask, ids_restore
     
 
     def discriminator(self, currupt_img):
@@ -229,7 +217,7 @@ class MaskedAutoencoderViT(nn.Module):
         output = self.discriminator(x)
         output = output[:, 1:, 0]
         target = 1 - mask
-        target = target.double()
+        target = target.float()
 
         disc_loss = torch.nn.BCELoss()
         return disc_loss(output, target)
@@ -280,28 +268,20 @@ class MaskedAutoencoderViT(nn.Module):
 
     def forward_loss(self, imgs, pred, mask):
         """
-        imgs: (N, 1, H, W) - 12 channel ECG - H = No. of channels, W = Length of ECG signal (1000 in this case)
-        x: (N, L, patch_size_height*patch_size_width*1)
+        imgs: [N, 3, H, W]
+        pred: [N, L, p*p*3]
         mask: [N, L], 0 is keep, 1 is remove, 
         """
-        # pred = self.unpatchify(pred)
         target = self.patchify(imgs)
         if self.norm_pix_loss:
             mean = target.mean(dim=-1, keepdim=True)
             var = target.var(dim=-1, keepdim=True)
             target = (target - mean) / (var + 1.e-6)**.5
-            
-        if torch.isnan(target).any():
-            print("NaN values found in target")
-        if torch.isnan(pred).any():
-            print("NaN values found in pred tensors")
 
-        loss = (pred - target)**2
+        loss = (pred - target) ** 2
         loss = loss.mean(dim=-1)  # [N, L], mean loss per patch
-        # print(loss)
+
         loss = (loss * mask).sum() / mask.sum()  # mean loss on removed patches
-        # loss = (loss).sum() / len(loss)*240
-        # print(loss)
         return loss
 
     def forward(self, imgs, mask_ratio=0.75):
@@ -336,6 +316,8 @@ def mae_vit_1dcnn(**kwargs):
     return model
 
 def mae_vit_base_patch16_dec512d8b(**kwargs):
+    # import pdb
+    # pdb.set_trace()
     model = MaskedAutoencoderViT(
         patch_size=16, embed_dim=768, depth=12, num_heads=12,
         decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,

@@ -19,6 +19,7 @@ import utils.misc as misc
 import utils.lr_sched as lr_sched
 from adap_weight import aw_loss
 from utils.misc import plot_reconstruction
+import wandb
 
 
 
@@ -40,7 +41,9 @@ def train_one_epoch(model: torch.nn.Module,
     if log_writer is not None:
         print('log_dir: {}'.format(log_writer.log_dir))
 
-    for data_iter_step, (samples,_) in enumerate(data_loader):
+    for data_iter_step, (samples, _) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
+        # import pdb
+        # pdb.set_trace()
 
         # we use a per iteration (instead of per epoch) lr scheduler
         if data_iter_step % accum_iter == 0:
@@ -98,20 +101,22 @@ def train_one_epoch(model: torch.nn.Module,
         disc_loss_value_reduce = misc.all_reduce_mean(disc_loss_value)
         gen_loss_value_reduce = misc.all_reduce_mean(gen_loss_value)
         mae_loss_value_reduce = misc.all_reduce_mean(mae_loss_value)
+        
 
 
         if log_writer is not None and (data_iter_step + 1) % accum_iter == 0:
             """ We use epoch_1000x as the x-axis in tensorboard.
             This calibrates different curves when batch size changes.
             """
+            wandb.log({"disc_train_loss": disc_loss_value_reduce, 'gen_train_loss':gen_loss_value_reduce, 'mae_loss':mae_loss_value_reduce,'lr': lr,'epoch':epoch })
             epoch_1000x = int((data_iter_step / len(data_loader) + epoch) * 1000)
             log_writer.add_scalar('disc_train_loss', disc_loss_value_reduce, epoch_1000x)
             log_writer.add_scalar('gen_train_loss', gen_loss_value_reduce, epoch_1000x)
             log_writer.add_scalar('mae_loss', mae_loss_value_reduce, epoch_1000x)
             log_writer.add_scalar('lr', lr, epoch_1000x)
-            log_writer.add_figure('Reconstructed vs. actuals',
-                            plot_reconstruction(currupt_img, samples),
-                            global_step=epoch * len(data_loader) + data_iter_step)
+            # log_writer.add_figure('Reconstructed vs. actuals',
+            #                 plot_reconstruction(currupt_img, samples),
+            #                 global_step=epoch * len(data_loader) + data_iter_step)
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
